@@ -384,6 +384,9 @@ class ColdChainModelTrainer:
     
     def plot_diagnostics(self, output_dir="plots"):
         """Generate diagnostic plots for model evaluation."""
+        if 'rf' not in self.evaluation_results or 'xgb' not in self.evaluation_results:
+            self.evaluate()
+        
         os.makedirs(output_dir, exist_ok=True)
         
         print(f"\n[INFO] Generating diagnostic plots to {output_dir}/")
@@ -821,6 +824,9 @@ def main():
         trainer = ColdChainModelTrainer()
         trainer.train(df)
         trainer.save_models(args.models_dir)
+        
+        print("[INFO] Evaluating models for plotting...")
+        trainer.evaluate()
         
         print("[INFO] Generating diagnostic plots...")
         trainer.plot_diagnostics("plots")
