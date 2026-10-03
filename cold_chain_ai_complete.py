@@ -1,12 +1,14 @@
 """
-Cold Chain Intelligence AI/ML Module
-Complete implementation for spoilage risk prediction, anomaly detection, and shipment risk scoring.
+Cold Chain Intelligence AI/ML Module - Enhanced with Evaluation & Visualization
+Complete implementation with data generation, model training, evaluation metrics, and diagnostic plots.
 
 Usage:
 1. Generate synthetic data: python cold_chain_ai_complete.py --generate-data
 2. Train models: python cold_chain_ai_complete.py --train
-3. Run API server: python cold_chain_ai_complete.py --serve
-4. Make predictions: python cold_chain_ai_complete.py --predict '{"route":"Coastal",...}'
+3. Evaluate models: python cold_chain_ai_complete.py --evaluate
+4. Plot diagnostics: python cold_chain_ai_complete.py --plot-diagnostics
+5. Run API server: python cold_chain_ai_complete.py --serve
+6. Make predictions: python cold_chain_ai_complete.py --predict '{"route":"Coastal",...}'
 """
 
 import sys
@@ -26,8 +28,18 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
-from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
+from sklearn.metrics import (
+    classification_report, roc_auc_score, confusion_matrix, accuracy_score,
+    precision_recall_curve, roc_curve, auc, precision_score, recall_score,
+    f1_score, matthews_corrcoef
+)
 import xgboost as xgb
+
+# Plotting Libraries
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import seaborn as sns
 
 # FastAPI
 from fastapi import FastAPI, HTTPException
@@ -167,11 +179,11 @@ class SyntheticDataGenerator:
 
 
 # ===========================
-# PART 2: MODEL TRAINING
+# PART 2: MODEL TRAINING WITH EVALUATION
 # ===========================
 
 class ColdChainModelTrainer:
-    """Train ML models for cold chain intelligence."""
+    """Train ML models for cold chain intelligence with comprehensive evaluation."""
     
     def __init__(self):
         self.rf_model = None
@@ -179,10 +191,19 @@ class ColdChainModelTrainer:
         self.anomaly_model = None
         self.preprocessor = None
         self.metrics = {}
+        self.evaluation_results = {}
+        self.X_train = None
+        self.X_test = None
+        self.y_train = None
+        self.y_test = None
+        self.y_pred_rf = None
+        self.y_pred_xgb = None
+        self.y_prob_rf = None
+        self.y_prob_xgb = None
     
     def train(self, df):
-        """Train all models."""
-        print("[INFO] Starting model training...")
+        """Train all models with 80/20 split."""
+        print("[INFO] Starting model training with 80/20 train-test split...")
         
         # Prepare features and target
         cat_cols = ["route", "product_type", "transport_mode", "storage_type", "season"]
@@ -193,6 +214,16 @@ class ColdChainModelTrainer:
         
         X = df[cat_cols + num_cols]
         y_spoilage = df["spoilage_risk_label"]
+        
+        # 80/20 split
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            X, y_spoilage, test_size=0.2, random_state=42, stratify=y_spoilage
+        )
+        
+        print(f"[INFO] Training set size: {len(self.X_train)} samples")
+        print(f"[INFO] Testing set size: {len(self.X_test)} samples")
+        print(f"[INFO] Class distribution - Train: {np.bincount(self.y_train)}")
+        print(f"[INFO] Class distribution - Test: {np.bincount(self.y_test)}")
         
         # Build preprocessor
         self.preprocessor = ColumnTransformer(
@@ -205,27 +236,20 @@ class ColdChainModelTrainer:
             ]
         )
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y_spoilage, test_size=0.2, random_state=42, stratify=y_spoilage
-        )
-        
         # RandomForest Model
-        print("[INFO] Training RandomForest model...")
+        print("\n[INFO] Training RandomForest model...")
         self.rf_model = Pipeline([
             ("preprocessor", self.preprocessor),
             ("model", RandomForestClassifier(
                 n_estimators=300, random_state=42, class_weight="balanced", n_jobs=-1
             ))
         ])
-        self.rf_model.fit(X_train, y_train)
+        self.rf_model.fit(self.X_train, self.y_train)
         
-        rf_pred = self.rf_model.predict(X_test)
-        rf_prob = self.rf_model.predict_proba(X_test)[:, 1]
-        rf_auc = roc_auc_score(y_test, rf_prob)
+        self.y_pred_rf = self.rf_model.predict(self.X_test)
+        self.y_prob_rf = self.rf_model.predict_proba(self.X_test)[:, 1]
         
-        print("[INFO] RandomForest ROC-AUC:", round(rf_auc, 4))
-        self.metrics['rf_roc_auc'] = rf_auc
+        print("[INFO] RandomForest predictions complete")
         
         # XGBoost Model
         print("[INFO] Training XGBoost model...")
@@ -245,16 +269,14 @@ class ColdChainModelTrainer:
                 random_state=42, tree_method='hist'
             ))
         ])
-        self.xgb_model.fit(X_train, y_train)
+        self.xgb_model.fit(self.X_train, self.y_train)
         
-        xgb_pred = self.xgb_model.predict(X_test)
-        xgb_prob = self.xgb_model.predict_proba(X_test)[:, 1]
-        xgb_auc = roc_auc_score(y_test, xgb_prob)
+        self.y_pred_xgb = self.xgb_model.predict(self.X_test)
+        self.y_prob_xgb = self.xgb_model.predict_proba(self.X_test)[:, 1]
         
-        print("[INFO] XGBoost ROC-AUC:", round(xgb_auc, 4))
-        self.metrics['xgb_roc_auc'] = xgb_auc
+        print("[INFO] XGBoost predictions complete")
         
-        # Anomaly Detection Model (Isolation Forest)
+        # Anomaly Detection Model
         print("[INFO] Training Isolation Forest for anomaly detection...")
         X_transformed = self.preprocessor.fit_transform(X)
         self.anomaly_model = IsolationForest(
@@ -263,8 +285,262 @@ class ColdChainModelTrainer:
         self.anomaly_model.fit(X_transformed)
         print("[INFO] Anomaly detection model trained")
         
-        print("[INFO] Model training complete!")
+        print("\n[INFO] Model training complete!")
         return self
+    
+    def evaluate(self):
+        """Comprehensive model evaluation."""
+        print("\n" + "="*80)
+        print("COMPREHENSIVE MODEL EVALUATION")
+        print("="*80)
+        
+        # RandomForest Evaluation
+        print("\n" + "-"*80)
+        print("RANDOMFOREST MODEL EVALUATION")
+        print("-"*80)
+        
+        rf_accuracy = accuracy_score(self.y_test, self.y_pred_rf)
+        rf_precision = precision_score(self.y_test, self.y_pred_rf)
+        rf_recall = recall_score(self.y_test, self.y_pred_rf)
+        rf_f1 = f1_score(self.y_test, self.y_pred_rf)
+        rf_auc = roc_auc_score(self.y_test, self.y_prob_rf)
+        rf_mcc = matthews_corrcoef(self.y_test, self.y_pred_rf)
+        
+        print(f"\nAccuracy:  {rf_accuracy:.4f}")
+        print(f"Precision: {rf_precision:.4f}")
+        print(f"Recall:    {rf_recall:.4f}")
+        print(f"F1-Score:  {rf_f1:.4f}")
+        print(f"ROC-AUC:   {rf_auc:.4f}")
+        print(f"Matthews Correlation Coefficient: {rf_mcc:.4f}")
+        
+        print("\nConfusion Matrix:")
+        rf_cm = confusion_matrix(self.y_test, self.y_pred_rf)
+        print(rf_cm)
+        print(f"True Negatives:  {rf_cm[0][0]}")
+        print(f"False Positives: {rf_cm[0][1]}")
+        print(f"False Negatives: {rf_cm[1][0]}")
+        print(f"True Positives:  {rf_cm[1][1]}")
+        
+        print("\nClassification Report:")
+        print(classification_report(self.y_test, self.y_pred_rf, 
+                                   target_names=["No Spoilage", "Spoilage Risk"]))
+        
+        self.evaluation_results['rf'] = {
+            'accuracy': rf_accuracy,
+            'precision': rf_precision,
+            'recall': rf_recall,
+            'f1': rf_f1,
+            'auc': rf_auc,
+            'mcc': rf_mcc,
+            'confusion_matrix': rf_cm.tolist()
+        }
+        
+        # XGBoost Evaluation
+        print("\n" + "-"*80)
+        print("XGBOOST MODEL EVALUATION")
+        print("-"*80)
+        
+        xgb_accuracy = accuracy_score(self.y_test, self.y_pred_xgb)
+        xgb_precision = precision_score(self.y_test, self.y_pred_xgb)
+        xgb_recall = recall_score(self.y_test, self.y_pred_xgb)
+        xgb_f1 = f1_score(self.y_test, self.y_pred_xgb)
+        xgb_auc = roc_auc_score(self.y_test, self.y_prob_xgb)
+        xgb_mcc = matthews_corrcoef(self.y_test, self.y_pred_xgb)
+        
+        print(f"\nAccuracy:  {xgb_accuracy:.4f}")
+        print(f"Precision: {xgb_precision:.4f}")
+        print(f"Recall:    {xgb_recall:.4f}")
+        print(f"F1-Score:  {xgb_f1:.4f}")
+        print(f"ROC-AUC:   {xgb_auc:.4f}")
+        print(f"Matthews Correlation Coefficient: {xgb_mcc:.4f}")
+        
+        print("\nConfusion Matrix:")
+        xgb_cm = confusion_matrix(self.y_test, self.y_pred_xgb)
+        print(xgb_cm)
+        print(f"True Negatives:  {xgb_cm[0][0]}")
+        print(f"False Positives: {xgb_cm[0][1]}")
+        print(f"False Negatives: {xgb_cm[1][0]}")
+        print(f"True Positives:  {xgb_cm[1][1]}")
+        
+        print("\nClassification Report:")
+        print(classification_report(self.y_test, self.y_pred_xgb,
+                                   target_names=["No Spoilage", "Spoilage Risk"]))
+        
+        self.evaluation_results['xgb'] = {
+            'accuracy': xgb_accuracy,
+            'precision': xgb_precision,
+            'recall': xgb_recall,
+            'f1': xgb_f1,
+            'auc': xgb_auc,
+            'mcc': xgb_mcc,
+            'confusion_matrix': xgb_cm.tolist()
+        }
+        
+        print("\n" + "="*80)
+        print("SUMMARY")
+        print("="*80)
+        print(f"RandomForest ROC-AUC: {rf_auc:.4f} | XGBoost ROC-AUC: {xgb_auc:.4f}")
+        print(f"RandomForest Accuracy: {rf_accuracy:.4f} | XGBoost Accuracy: {xgb_accuracy:.4f}")
+    
+    def plot_diagnostics(self, output_dir="plots"):
+        """Generate diagnostic plots for model evaluation."""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        print(f"\n[INFO] Generating diagnostic plots to {output_dir}/")
+        
+        # Set style
+        sns.set_style("whitegrid")
+        
+        # 1. ROC Curves
+        print("[INFO] Plotting ROC curves...")
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        fpr_rf, tpr_rf, _ = roc_curve(self.y_test, self.y_prob_rf)
+        fpr_xgb, tpr_xgb, _ = roc_curve(self.y_test, self.y_prob_xgb)
+        
+        auc_rf = auc(fpr_rf, tpr_rf)
+        auc_xgb = auc(fpr_xgb, tpr_xgb)
+        
+        ax.plot(fpr_rf, tpr_rf, label=f'RandomForest (AUC = {auc_rf:.4f})', linewidth=2.5)
+        ax.plot(fpr_xgb, tpr_xgb, label=f'XGBoost (AUC = {auc_xgb:.4f})', linewidth=2.5)
+        ax.plot([0, 1], [0, 1], 'k--', label='Random Classifier (AUC = 0.5000)', linewidth=2)
+        
+        ax.set_xlabel('False Positive Rate', fontsize=12, fontweight='bold')
+        ax.set_ylabel('True Positive Rate', fontsize=12, fontweight='bold')
+        ax.set_title('ROC Curve - Spoilage Risk Prediction', fontsize=14, fontweight='bold')
+        ax.legend(loc='lower right', fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/roc_curves.png", dpi=300, bbox_inches='tight')
+        print(f"[INFO] Saved: {output_dir}/roc_curves.png")
+        plt.close()
+        
+        # 2. Precision-Recall Curves
+        print("[INFO] Plotting precision-recall curves...")
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        precision_rf, recall_rf, _ = precision_recall_curve(self.y_test, self.y_prob_rf)
+        precision_xgb, recall_xgb, _ = precision_recall_curve(self.y_test, self.y_prob_xgb)
+        
+        auc_pr_rf = auc(recall_rf, precision_rf)
+        auc_pr_xgb = auc(recall_xgb, precision_xgb)
+        
+        ax.plot(recall_rf, precision_rf, label=f'RandomForest (AUC = {auc_pr_rf:.4f})', linewidth=2.5)
+        ax.plot(recall_xgb, precision_xgb, label=f'XGBoost (AUC = {auc_pr_xgb:.4f})', linewidth=2.5)
+        
+        baseline = (self.y_test == 1).sum() / len(self.y_test)
+        ax.axhline(y=baseline, color='k', linestyle='--', label=f'Baseline Precision = {baseline:.4f}', linewidth=2)
+        
+        ax.set_xlabel('Recall', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Precision', fontsize=12, fontweight='bold')
+        ax.set_title('Precision-Recall Curve - Spoilage Risk Prediction', fontsize=14, fontweight='bold')
+        ax.legend(loc='upper right', fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim([0, 1])
+        ax.set_ylim([0, 1])
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/precision_recall_curves.png", dpi=300, bbox_inches='tight')
+        print(f"[INFO] Saved: {output_dir}/precision_recall_curves.png")
+        plt.close()
+        
+        # 3. Confusion Matrices
+        print("[INFO] Plotting confusion matrices...")
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        
+        rf_cm = confusion_matrix(self.y_test, self.y_pred_rf)
+        xgb_cm = confusion_matrix(self.y_test, self.y_pred_xgb)
+        
+        sns.heatmap(rf_cm, annot=True, fmt='d', cmap='Blues', ax=axes[0], 
+                   xticklabels=['No Spoilage', 'Spoilage'], 
+                   yticklabels=['No Spoilage', 'Spoilage'])
+        axes[0].set_title('RandomForest Confusion Matrix', fontsize=12, fontweight='bold')
+        axes[0].set_ylabel('True Label', fontweight='bold')
+        axes[0].set_xlabel('Predicted Label', fontweight='bold')
+        
+        sns.heatmap(xgb_cm, annot=True, fmt='d', cmap='Greens', ax=axes[1],
+                   xticklabels=['No Spoilage', 'Spoilage'],
+                   yticklabels=['No Spoilage', 'Spoilage'])
+        axes[1].set_title('XGBoost Confusion Matrix', fontsize=12, fontweight='bold')
+        axes[1].set_ylabel('True Label', fontweight='bold')
+        axes[1].set_xlabel('Predicted Label', fontweight='bold')
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/confusion_matrices.png", dpi=300, bbox_inches='tight')
+        print(f"[INFO] Saved: {output_dir}/confusion_matrices.png")
+        plt.close()
+        
+        # 4. Metrics Comparison
+        print("[INFO] Plotting metrics comparison...")
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        metrics_names = ['Accuracy', 'Precision', 'Recall', 'F1-Score', 'ROC-AUC']
+        rf_scores = [
+            self.evaluation_results['rf']['accuracy'],
+            self.evaluation_results['rf']['precision'],
+            self.evaluation_results['rf']['recall'],
+            self.evaluation_results['rf']['f1'],
+            self.evaluation_results['rf']['auc']
+        ]
+        xgb_scores = [
+            self.evaluation_results['xgb']['accuracy'],
+            self.evaluation_results['xgb']['precision'],
+            self.evaluation_results['xgb']['recall'],
+            self.evaluation_results['xgb']['f1'],
+            self.evaluation_results['xgb']['auc']
+        ]
+        
+        x = np.arange(len(metrics_names))
+        width = 0.35
+        
+        ax.bar(x - width/2, rf_scores, width, label='RandomForest', alpha=0.8)
+        ax.bar(x + width/2, xgb_scores, width, label='XGBoost', alpha=0.8)
+        
+        ax.set_ylabel('Score', fontsize=12, fontweight='bold')
+        ax.set_title('Model Performance Metrics Comparison', fontsize=14, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(metrics_names)
+        ax.legend(fontsize=11)
+        ax.set_ylim([0, 1.05])
+        ax.grid(axis='y', alpha=0.3)
+        
+        # Add value labels on bars
+        for i, (rf, xgb_val) in enumerate(zip(rf_scores, xgb_scores)):
+            ax.text(i - width/2, rf + 0.02, f'{rf:.3f}', ha='center', va='bottom', fontsize=9)
+            ax.text(i + width/2, xgb_val + 0.02, f'{xgb_val:.3f}', ha='center', va='bottom', fontsize=9)
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/metrics_comparison.png", dpi=300, bbox_inches='tight')
+        print(f"[INFO] Saved: {output_dir}/metrics_comparison.png")
+        plt.close()
+        
+        # 5. Probability Distribution
+        print("[INFO] Plotting prediction probability distributions...")
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        
+        axes[0].hist([self.y_prob_rf[self.y_test == 0], self.y_prob_rf[self.y_test == 1]], 
+                    label=['No Spoilage', 'Spoilage'], bins=30, alpha=0.7)
+        axes[0].set_xlabel('Prediction Probability', fontweight='bold')
+        axes[0].set_ylabel('Frequency', fontweight='bold')
+        axes[0].set_title('RandomForest Probability Distribution', fontsize=12, fontweight='bold')
+        axes[0].legend()
+        axes[0].grid(axis='y', alpha=0.3)
+        
+        axes[1].hist([self.y_prob_xgb[self.y_test == 0], self.y_prob_xgb[self.y_test == 1]], 
+                    label=['No Spoilage', 'Spoilage'], bins=30, alpha=0.7)
+        axes[1].set_xlabel('Prediction Probability', fontweight='bold')
+        axes[1].set_ylabel('Frequency', fontweight='bold')
+        axes[1].set_title('XGBoost Probability Distribution', fontsize=12, fontweight='bold')
+        axes[1].legend()
+        axes[1].grid(axis='y', alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/probability_distributions.png", dpi=300, bbox_inches='tight')
+        print(f"[INFO] Saved: {output_dir}/probability_distributions.png")
+        plt.close()
+        
+        print(f"\n[INFO] All diagnostic plots saved to {output_dir}/")
     
     def save_models(self, prefix="models"):
         """Save trained models to files."""
@@ -471,7 +747,11 @@ def main():
     parser.add_argument("--generate-data", action="store_true", 
                        help="Generate synthetic data")
     parser.add_argument("--train", action="store_true", 
-                       help="Train models")
+                       help="Train models with 80/20 split")
+    parser.add_argument("--evaluate", action="store_true",
+                       help="Evaluate trained models on test set")
+    parser.add_argument("--plot-diagnostics", action="store_true",
+                       help="Generate diagnostic plots (ROC, PR curves, confusion matrix, etc.)")
     parser.add_argument("--serve", action="store_true", 
                        help="Run FastAPI server")
     parser.add_argument("--predict", type=str, 
@@ -504,13 +784,46 @@ def main():
         
         df = pd.read_csv("synthetic_cold_chain_data.csv")
         
-        print("[INFO] Training models...")
+        print("[INFO] Training models with 80/20 split...")
         trainer = ColdChainModelTrainer()
         trainer.train(df)
         trainer.save_models(args.models_dir)
         
         print("\n[INFO] Training Complete!")
-        print(f"[INFO] Metrics: {trainer.metrics}")
+    
+    # Evaluate models
+    elif args.evaluate:
+        print("[INFO] Loading data...")
+        if not os.path.exists("synthetic_cold_chain_data.csv"):
+            print("[ERROR] synthetic_cold_chain_data.csv not found. Run --generate-data first.")
+            sys.exit(1)
+        
+        df = pd.read_csv("synthetic_cold_chain_data.csv")
+        
+        print("[INFO] Training models...")
+        trainer = ColdChainModelTrainer()
+        trainer.train(df)
+        trainer.save_models(args.models_dir)
+        
+        print("[INFO] Evaluating models on test set...")
+        trainer.evaluate()
+    
+    # Plot diagnostics
+    elif args.plot_diagnostics:
+        print("[INFO] Loading data...")
+        if not os.path.exists("synthetic_cold_chain_data.csv"):
+            print("[ERROR] synthetic_cold_chain_data.csv not found. Run --generate-data first.")
+            sys.exit(1)
+        
+        df = pd.read_csv("synthetic_cold_chain_data.csv")
+        
+        print("[INFO] Training models...")
+        trainer = ColdChainModelTrainer()
+        trainer.train(df)
+        trainer.save_models(args.models_dir)
+        
+        print("[INFO] Generating diagnostic plots...")
+        trainer.plot_diagnostics("plots")
     
     # Run API server
     elif args.serve:
